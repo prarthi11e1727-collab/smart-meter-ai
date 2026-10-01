@@ -62,14 +62,13 @@ def start_mqtt():
     client.on_message = on_message
 
     try:
-       client.connect(
-        st.secrets["MQTT_BROKER"],
-        int(st.secrets["MQTT_PORT"]),
-        60
-    )
+           client.connect(
+            st.secrets["MQTT_BROKER"],
+            int(st.secrets["MQTT_PORT"]),
+            60
+        )
     except Exception as e:
-       print("MQTT CONNECTION ERROR:", repr(e))
-
+        print("MQTT CONNECTION ERROR:", repr(e))
     client.loop_start()
 
     return state
