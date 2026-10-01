@@ -24,6 +24,7 @@ def start_mqtt():
     def on_connect(client, userdata, flags, reason_code, properties=None):
         if reason_code == 0:
             print("Connected to HiveMQ Cloud")
+            print("SUBSCRIBING TO:", st.secrets["MQTT_TOPIC"])
             client.subscribe(st.secrets["MQTT_TOPIC"])
         else:
             print("MQTT connection failed:", reason_code)
