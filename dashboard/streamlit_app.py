@@ -30,7 +30,6 @@ def start_mqtt():
             print("MQTT connection failed:", reason_code)
 
     def on_message(client, userdata, msg):
-
         try:
             data = json.loads(msg.payload.decode())
 
@@ -42,7 +41,7 @@ def start_mqtt():
                     state["history"].pop(0)
 
         except Exception as e:
-            print("Message error:", e)
+            print("Message error:", repr(e))
 
     client = mqtt.Client(
         mqtt.CallbackAPIVersion.VERSION2
@@ -62,32 +61,35 @@ def start_mqtt():
     client.on_message = on_message
 
     try:
-           client.connect(
+        client.connect(
             st.secrets["MQTT_BROKER"],
             int(st.secrets["MQTT_PORT"]),
             60
         )
     except Exception as e:
         print("MQTT CONNECTION ERROR:", repr(e))
+
     client.loop_start()
 
     return state
 
 
-# Start MQTT
+# Start MQTT connection
 state = start_mqtt()
 
 
-# Get latest data
+# Get latest MQTT data
 with state["lock"]:
     latest = state["latest"]
     history = list(state["history"])
 
 
+# Dashboard title
 st.title("⚡ AI-Based Smart Meter Monitoring")
 st.subheader("Live IoT Electricity Consumption Dashboard")
 
 
+# Display live data
 if latest:
 
     col1, col2, col3, col4 = st.columns(4)
@@ -116,6 +118,7 @@ if latest:
 
     st.divider()
 
+    # Live charts
     if history:
 
         df = pd.DataFrame(history)
@@ -130,6 +133,7 @@ if latest:
         st.line_chart(df["current"])
 
         st.subheader("📋 Recent Meter Readings")
+
         st.dataframe(
             df.tail(20),
             width="stretch"
@@ -137,7 +141,9 @@ if latest:
 
 else:
 
-    st.warning("⏳ Waiting for live data from HiveMQ Cloud...")
+    st.warning(
+        "⏳ Waiting for live data from HiveMQ Cloud..."
+    )
 
     st.info(
         "Make sure your Python MQTT publisher is running."
