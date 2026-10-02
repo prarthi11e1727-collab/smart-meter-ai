@@ -1,4 +1,8 @@
 streamlit
 pandas
-paho-mqtt
+numpy
+scikit-learn
+paho-mqtt>=2.0
 websocket-client
+streamlit-autorefresh
+python-dotenv
