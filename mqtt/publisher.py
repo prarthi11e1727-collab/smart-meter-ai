@@ -40,8 +40,13 @@ print("Sending smart meter data...")
 
 try:
     while True:
-        voltage = round(random.uniform(220, 240), 2)
-        current = round(random.uniform(1, 5), 2)
+        if random.random() < 0.08:  # occasional fault for the demo
+            voltage = round(random.uniform(255, 275), 2)
+            current = round(random.uniform(7, 10), 2)
+        else:
+            voltage = round(random.uniform(220, 240), 2)
+            current = round(random.uniform(1, 5), 2)
+
         power = round(voltage * current, 2)
         energy = round(power / 1000, 3)
 

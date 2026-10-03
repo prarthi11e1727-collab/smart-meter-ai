@@ -18,7 +18,7 @@ except ImportError:
     pass
 
 # ---------------------------------------------------------------- settings
-TOPIC = "smartmeter/data"
+TOPIC = "smartmeter/result"   # AI-labelled readings published by live_anomaly.py
 PORT = 8883
 MAX_ROWS = 500
 REFRESH_MS = 2000
@@ -191,8 +191,11 @@ while not q.empty():
     except (KeyError, TypeError, ValueError):
         continue
     row["timestamp"] = r.get("timestamp", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"))
-    pred = model.predict(pd.DataFrame([row])[FEATURES])[0]
-    row["ai_status"] = "Anomaly" if pred == -1 else "Normal"
+    status = r.get("ai_status")  # label sent by live_anomaly.py
+    if status not in ("Normal", "Anomaly"):  # fallback: classify locally
+        pred = model.predict(pd.DataFrame([row])[FEATURES])[0]
+        status = "Anomaly" if pred == -1 else "Normal"
+    row["ai_status"] = status
     st.session_state.readings.append(row)
     if row["ai_status"] == "Anomaly":
         st.session_state.anomaly_log.append(row)
@@ -408,7 +411,7 @@ if page.endswith("About"):
     page_about()
 elif df.empty:
     hero("⚡ Smart Meter Dashboard", "Waiting for the first reading")
-    st.info("Waiting for live data from HiveMQ Cloud. Is publisher.py running?")
+    st.info("Waiting for live data from HiveMQ Cloud. Are publisher.py and live_anomaly.py running?")
 elif page.endswith("Overview"):
     page_overview()
 elif page.endswith("Live Charts"):
