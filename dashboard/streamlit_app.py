@@ -3,6 +3,7 @@ import json
 import os
 import queue
 
+import altair as alt
 import numpy as np
 import pandas as pd
 import paho.mqtt.client as mqtt
@@ -227,6 +228,49 @@ else:
     st.markdown('<span class="pill pill-warn">🟡 Connecting to HiveMQ Cloud...</span>', unsafe_allow_html=True)
 
 
+# ---------------------------------------------------------------- charts
+def make_chart(data, col, title, unit, color, normal=None, rule=None, height=380):
+    """Readable line chart: zoomed axis, labels, markers, tooltip, optional
+    green 'normal range' band and red limit line."""
+    d = data.copy()
+    d["time"] = pd.to_datetime(d["timestamp"])
+    lo, hi = float(d[col].min()), float(d[col].max())
+    pad = max((hi - lo) * 0.15, 0.5)
+    ymin, ymax = lo - pad, hi + pad
+    if normal:
+        ymin, ymax = min(ymin, normal[0] - 2), max(ymax, normal[1] + 2)
+    if rule:
+        ymax = max(ymax, rule + 20)
+    ydomain = alt.Scale(domain=[ymin, ymax], nice=False)
+
+    base = alt.Chart(d).encode(
+        x=alt.X("time:T", title="Time",
+                axis=alt.Axis(format="%H:%M:%S", labelAngle=0, tickCount=6, grid=False)),
+        y=alt.Y(f"{col}:Q", title=f"{title} ({unit})", scale=ydomain),
+        tooltip=[
+            alt.Tooltip("time:T", title="Time", format="%H:%M:%S"),
+            alt.Tooltip(f"{col}:Q", title=f"{title} ({unit})", format=".2f"),
+        ],
+    )
+    layers = []
+    if normal:
+        band_df = pd.DataFrame({"lo": [normal[0]], "hi": [normal[1]]})
+        layers.append(
+            alt.Chart(band_df).mark_rect(color="#22c55e", opacity=0.12).encode(
+                y=alt.Y("lo:Q", scale=ydomain), y2="hi:Q"
+            )
+        )
+    if rule:
+        layers.append(
+            alt.Chart(pd.DataFrame({"r": [rule]}))
+            .mark_rule(color="#ef4444", strokeDash=[6, 4], strokeWidth=2)
+            .encode(y=alt.Y("r:Q", scale=ydomain))
+        )
+    layers.append(base.mark_line(color=color, strokeWidth=2.5, interpolate="monotone"))
+    layers.append(base.mark_point(color=color, size=45, filled=True))
+    return alt.layer(*layers).properties(height=height).interactive()
+
+
 # ---------------------------------------------------------------- pages
 def page_overview():
     hero("⚡ Smart Meter Dashboard", "Live electricity monitoring with AI anomaly detection")
@@ -250,19 +294,47 @@ def page_overview():
     st.caption(f"System status: Online · Last reading: {latest['timestamp']}")
     st.write("")
     st.subheader("Power trend")
-    st.area_chart(df.set_index("timestamp")["power"], height=280)
+    st.caption(f"Red dashed line = high power limit ({limit} W)")
+    st.altair_chart(
+        make_chart(df.tail(60), "power", "Power", "W", "#f59e0b", rule=limit, height=300),
+        use_container_width=True,
+    )
 
 
 def page_charts():
     hero("📈 Live Charts", "Real-time voltage, current and power graphs")
-    chart_df = df.set_index("timestamp")
+    n = st.slider("Readings to show", 10, 200, 60, step=10)
+    view = df.tail(n)
+
+    def stats(col, unit, fmt):
+        a, b, c = st.columns(3, gap="medium")
+        a.metric("⬇️ Min", f"{view[col].min():{fmt}} {unit}")
+        b.metric("📊 Average", f"{view[col].mean():{fmt}} {unit}")
+        c.metric("⬆️ Max", f"{view[col].max():{fmt}} {unit}")
+        st.write("")
+
     t1, t2, t3 = st.tabs(["⚡ Power", "🔌 Voltage", "〰️ Current"])
     with t1:
-        st.line_chart(chart_df["power"], height=380)
+        stats("power", "W", ".1f")
+        st.caption(f"Red dashed line = high power limit ({limit} W). Hover over a point for exact values.")
+        st.altair_chart(
+            make_chart(view, "power", "Power", "W", "#f59e0b", rule=limit),
+            use_container_width=True,
+        )
     with t2:
-        st.line_chart(chart_df["voltage"], height=380)
+        stats("voltage", "V", ".1f")
+        st.caption("Green band = normal voltage range (220 to 240 V). Hover over a point for exact values.")
+        st.altair_chart(
+            make_chart(view, "voltage", "Voltage", "V", "#38bdf8", normal=(220, 240)),
+            use_container_width=True,
+        )
     with t3:
-        st.line_chart(chart_df["current"], height=380)
+        stats("current", "A", ".2f")
+        st.caption("Green band = normal current range (1 to 5 A). Hover over a point for exact values.")
+        st.altair_chart(
+            make_chart(view, "current", "Current", "A", "#a78bfa", normal=(1, 5)),
+            use_container_width=True,
+        )
 
 
 def page_alerts():
