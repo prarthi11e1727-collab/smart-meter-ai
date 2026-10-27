@@ -200,6 +200,26 @@ with st.sidebar:
         st.session_state.logged_in = False
         st.rerun()
 
+    # ---- HiveMQ MQTT link section
+    st.divider()
+    st.markdown("### ⚙️ HiveMQ MQTT Link")
+    last_msg = store[-1] if len(store) else None
+    st.caption("Broker")
+    st.code(f"{get_secret('HIVEMQ_HOST') or 'not set'}:{PORT}", language=None)
+    st.caption("Topic")
+    st.code(TOPIC, language=None)
+    st.caption("Building ID")
+    st.code(str(last_msg["building_id"]) if last_msg else "-", language=None)
+    st.caption("Messages received")
+    st.code(str(len(store)), language=None)
+    st.caption("Connection")
+    if mqtt_status["error"]:
+        st.error("ERROR")
+    elif mqtt_status["connected"]:
+        st.success("CONNECTED")
+    else:
+        st.warning("CONNECTING")
+
 rows = list(store)
 df = pd.DataFrame(rows)
 anomaly_log = [r for r in rows if r["ai_status"] == "Anomaly"][-100:]
