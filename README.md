@@ -1,338 +1,92 @@
-\# AI-Based Smart Meter Consumption Anomaly Detection Using IoT
+# AI-Based Smart Meter Consumption Anomaly Detection Using IoT
 
+A live dashboard that watches hourly smart meter readings, uses a machine learning model to flag unusual consumption, and shows alerts in real time. Readings travel over MQTT through HiveMQ Cloud, and the dashboard is built with Streamlit.
 
+**Live demo:**  https://appapppy-ghef7im5vzlreggxvafvkg.streamlit.app/
+**Demo login:** ask the project owner for the demo username and password.
 
-\## 📌 Project Overview
+## How it works
 
+```
+Kaggle dataset replay -> MQTT -> HiveMQ Cloud -> AI model -> Dashboard -> Alerts
+```
 
+1. **Replay.** Hourly readings for building 107 (year 2016) are replayed one at a time, like a real meter sending data.
+2. **MQTT and HiveMQ Cloud.** Each reading is published to the topic `smartmeter/kaggle/data`.
+3. **AI model.** A Random Forest (scikit-learn), trained on the labelled Kaggle data, gives every reading an anomaly chance and labels it Normal or Anomaly. The result is published to `smartmeter/kaggle/result`, and flagged readings also go to `smartmeter/kaggle/anomaly`.
+4. **Dashboard.** The Streamlit app subscribes to HiveMQ and shows the readings, charts and alerts.
 
-This project presents an IoT-based smart meter monitoring system that collects electricity consumption data, stores it, analyzes it using Machine Learning, and displays the results on a real-time dashboard.
+In the deployed site, the replay and the AI scoring run inside the Streamlit app, so nothing has to run on a personal computer.
 
+## Features
 
+- Login page protecting the dashboard
+- Overview with latest reading, building, AI status, anomaly chance and summary numbers
+- Live charts of meter readings and anomaly chance, with red points for anomalies
+- High reading alert, with a limit you can set in the sidebar
+- AI vs real label comparison: caught, missed, false alarms and agreement
+- Anomaly log and data table, with CSV download
+- MQTT feed page showing the raw messages from HiveMQ
 
-The system uses synthetic smart meter data for development and testing. MQTT is used for communication, HiveMQ Cloud acts as the MQTT broker, SQLite stores the readings, and an Isolation Forest Machine Learning model detects unusual consumption patterns.
+## Dataset
 
+A labelled smart meter dataset from Kaggle: A labelled smart meter dataset from Kaggle: Large-scale Energy Anomaly Detection (LEAD), https://www.kaggle.com/competitions/energy-anomaly-detection/data.
 
+| Column | Meaning |
+|---|---|
+| building_id | The building the reading belongs to (the demo replays building 107) |
+| timestamp | Date and hour of the reading, one per hour from 2016-01-01 00:00:00 |
+| meter_reading | Electricity consumption for that hour (kWh assumed) |
+| anomaly | The real label: 1 = anomaly, 0 = normal |
 
-\## 🎯 Objectives
+Rows with missing values are dropped. The dataset has no voltage, current or power columns, so the system works only with hourly consumption.
 
+The model uses these features: `building_id`, `meter_reading`, and `hour`, `day_of_week` and `month` taken from the timestamp.
 
+The full Kaggle training files are not stored in this repository. `dashboard/demo_building_107.csv` is a small file with only building 107, used for the demo.
 
-\- Generate smart meter electricity consumption data.
+## Project structure
 
-\- Transmit meter readings using MQTT.
+```
+ai/         model training and live scoring, plus the trained model (kaggle_anomaly_model.joblib)
+dashboard/  Streamlit app (streamlit_app.py) and the demo data (demo_building_107.csv)
+mqtt/       publisher and subscriber scripts for running the flow on a computer
+requirements.txt
+```
 
-\- Use HiveMQ Cloud as the MQTT broker.
+## Run it yourself
 
-\- Store readings in an SQLite database.
+1. Install the packages:
+   ```
+   pip install -r requirements.txt
+   ```
+2. Create a free HiveMQ Cloud cluster and note its host, username and password.
+3. Set these values in a `.env` file (never upload this file) or in Streamlit Secrets:
+   ```
+   HIVEMQ_HOST = "your-host.s1.eu.hivemq.cloud"
+   HIVEMQ_USER = "your-hivemq-username"
+   HIVEMQ_PASS = "your-hivemq-password"
+   APP_USERNAME = "demo"
+   APP_PASSWORD = "your-demo-password"
+   ```
+4. Start the dashboard:
+   ```
+   streamlit run dashboard/streamlit_app.py
+   ```
 
-\- Monitor voltage, current, power and energy.
+## Deploying on Streamlit Community Cloud
 
-\- Detect unusual consumption using Machine Learning.
+1. Push the repository to GitHub.
+2. On share.streamlit.io, create an app with the main file `dashboard/streamlit_app.py`.
+3. Add the five values above under Settings, then Secrets.
+4. In Share, set the app to public.
 
-\- Display live readings on a dashboard.
+## Notes
 
-\- Generate alerts for high power consumption and AI-detected anomalies.
+- The free HiveMQ plan has limits on connections, so avoid leaving extra tabs or scripts connected.
+- The app sleeps when nobody visits. The first visitor may wait while it wakes up, and the replay then starts again from 1 January.
+- Keep `.env` out of GitHub. Use Streamlit Secrets for deployed passwords.
 
-\- Maintain the project using Git and GitHub.
+## Tech stack
 
-
-
-\## 🏗️ System Architecture
-
-
-
-Synthetic Data Generator
-
-&#x20;       ↓
-
-&#x20;     MQTT
-
-&#x20;       ↓
-
-&#x20;  HiveMQ Cloud
-
-&#x20;       ↓
-
-&#x20;    SQLite
-
-&#x20;       ↓
-
-&#x20;     AI / ML
-
-&#x20;       ↓
-
-&#x20;   Node-RED
-
-&#x20;       ↓
-
-&#x20;   Dashboard
-
-&#x20;       ↓
-
-&#x20;     Alert
-
-
-
-\## 🔧 Technologies Used
-
-
-
-\### Programming
-
-\- Python
-
-\- JavaScript
-
-
-
-\### IoT and Communication
-
-\- MQTT
-
-\- HiveMQ Cloud
-
-
-
-\### Database
-
-\- SQLite
-
-
-
-\### Machine Learning
-
-\- Scikit-learn
-
-\- Isolation Forest
-
-
-
-\### Dashboard and Automation
-
-\- Node-RED
-
-\- FlowFuse Dashboard
-
-
-
-\### Development Tools
-
-\- VS Code
-
-\- Git
-
-\- GitHub
-
-
-
-\## 📊 Parameters Monitored
-
-
-
-The system monitors:
-
-
-
-\- Voltage (V)
-
-\- Current (A)
-
-\- Power (W)
-
-\- Energy
-
-
-
-Power is calculated using:
-
-
-
-Power = Voltage × Current
-
-
-
-\## 🤖 Anomaly Detection
-
-
-
-The project uses the Isolation Forest algorithm from Scikit-learn.
-
-
-
-The model analyzes:
-
-
-
-\- Voltage
-
-\- Current
-
-\- Power
-
-\- Energy
-
-
-
-Each reading is classified as either:
-
-
-
-\- Normal
-
-\- Anomaly
-
-
-
-The Machine Learning anomaly detection is different from the fixed high-power alert. A reading can be considered unusual by the ML model even when it does not cross the fixed power threshold.
-
-
-
-\## 🚨 Alert System
-
-
-
-The system provides two types of alerts.
-
-
-
-\### High Power Alert
-
-
-
-A threshold-based alert is generated when:
-
-
-
-Power > 1000 W
-
-
-
-\### AI Anomaly Alert
-
-
-
-An alert is generated when the Machine Learning model identifies an unusual consumption pattern.
-
-
-
-\## 📈 Dashboard
-
-
-
-The Node-RED dashboard provides:
-
-
-
-\- Latest Power
-
-\- Voltage
-
-\- Current
-
-\- Energy
-
-\- Maximum Power
-
-\- Average Power
-
-\- System Status
-
-\- Power Monitoring Graph
-
-\- Voltage Monitoring Graph
-
-\- Current Monitoring Graph
-
-\- Recent Smart Meter Readings
-
-\- AI Anomaly Status
-
-\- AI Anomaly Count
-
-\- AI Anomaly Log
-
-\- High Power Alerts
-
-\- AI Anomaly Alerts
-
-
-
-\## 🔐 Login System
-
-
-
-A basic dashboard login page has been implemented using Node-RED Dashboard.
-
-
-
-The login page contains:
-
-
-
-\- Username
-
-\- Password
-
-\- Login button
-
-\- Login status
-
-
-
-The password field uses password input mode so that the entered password is hidden.
-
-
-
-\## 📁 Project Structure
-
-
-
-```text
-
-smart-meter-ai/
-
-│
-
-├── ai/
-
-│   ├── anomaly\_detection.py
-
-│   └── live\_anomaly.py
-
-│
-
-├── dashboard/
-
-│   └── dashboard.py
-
-│
-
-├── data/
-
-│   ├── database.py
-
-│   └── synthetic\_data.csv
-
-│
-
-├── mqtt/
-
-│   ├── publisher.py
-
-│   └── subscriber.py
-
-│
-
-├── .gitignore
-
-├── electricity\_data.csv
-
-├── generate\_data.py
-
-├── plot\_data.py
-
-├── Figure\_1.png
-
-└── README.md
-
+Python, Streamlit, paho-mqtt, scikit-learn, Altair, pandas, HiveMQ Cloud
