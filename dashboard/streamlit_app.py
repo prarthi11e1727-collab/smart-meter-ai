@@ -2,6 +2,7 @@ import collections
 import hmac
 import json
 import os
+import time
 
 import altair as alt
 import pandas as pd
@@ -17,6 +18,7 @@ except ImportError:
 
 # ---------------------------------------------------------------- settings
 TOPIC = "smartmeter/kaggle/result"   # AI-labelled readings from kaggle_live_anomaly.py
+FEED_TOPIC = "smartmeter/kaggle/#"   # every Kaggle topic, for the MQTT Feed page
 PORT = 8883
 MAX_ROWS = 500
 REFRESH_MS = 2000
@@ -27,6 +29,7 @@ PAGES = [
     "🚨  Alerts",
     "🤖  AI Anomalies",
     "🗂️  Data & Export",
+    "📡  MQTT Feed",
     "ℹ️  About",
 ]
 STATUS_COLORS = alt.Scale(domain=["Normal", "Anomaly"], range=["#38bdf8", "#ef4444"])
@@ -132,6 +135,7 @@ def parse_row(r):
 def start_mqtt():
     """Runs once. The store is shared by every browser session."""
     store = collections.deque(maxlen=MAX_ROWS)
+    feed = collections.deque(maxlen=200)   # raw messages from all topics
     seen = set()
     status = {"connected": False, "error": None}
     host = get_secret("HIVEMQ_HOST")
@@ -140,7 +144,7 @@ def start_mqtt():
 
     if not (host and user and password):
         status["error"] = "Missing HIVEMQ_HOST / HIVEMQ_USER / HIVEMQ_PASS in secrets."
-        return store, seen, status, None
+        return store, seen, feed, status, None
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     client.username_pw_set(user, password)
@@ -150,7 +154,7 @@ def start_mqtt():
         if reason_code == 0:
             status["connected"] = True
             status["error"] = None
-            client.subscribe(TOPIC)
+            client.subscribe(FEED_TOPIC)
         else:
             status["connected"] = False
             status["error"] = f"Connection refused: {reason_code}"
@@ -159,8 +163,12 @@ def start_mqtt():
         status["connected"] = False
 
     def on_message(client, userdata, msg):
+        text = msg.payload.decode(errors="replace")
+        feed.append({"time": time.strftime("%H:%M:%S"), "topic": msg.topic, "payload": text})
+        if msg.topic != TOPIC:   # only the AI result topic feeds the dashboard pages
+            return
         try:
-            row = parse_row(json.loads(msg.payload.decode()))
+            row = parse_row(json.loads(text))
         except Exception:
             return
         if row is None:
@@ -179,10 +187,10 @@ def start_mqtt():
         client.loop_start()
     except Exception as e:
         status["error"] = str(e)
-    return store, seen, status, client
+    return store, seen, feed, status, client
 
 
-store, seen, mqtt_status, _client = start_mqtt()
+store, seen, feed, mqtt_status, _client = start_mqtt()
 st_autorefresh(interval=REFRESH_MS, key="live_refresh")
 
 # ---------------------------------------------------------------- sidebar
@@ -195,6 +203,7 @@ with st.sidebar:
     if st.button("🗑️ Clear data", use_container_width=True):
         store.clear()
         seen.clear()
+        feed.clear()
         st.rerun()
     if st.button("🚪 Logout", use_container_width=True):
         st.session_state.logged_in = False
@@ -443,6 +452,28 @@ def page_data():
     )
 
 
+def page_feed():
+    hero("📡 MQTT Feed", "Live messages from HiveMQ Cloud, like the HiveMQ Web Client")
+    msgs = list(feed)
+    c1, c2, c3 = st.columns(3, gap="medium")
+    c1.metric("📥 Messages in feed", len(msgs))
+    c2.metric("🤖 Result messages", sum(m["topic"].endswith("/result") for m in msgs))
+    c3.metric("🚨 Anomaly messages", sum(m["topic"].endswith("/anomaly") for m in msgs))
+    st.write("")
+    topics = ["All", "smartmeter/kaggle/data", "smartmeter/kaggle/result", "smartmeter/kaggle/anomaly"]
+    left, right = st.columns([2, 1], gap="medium")
+    choice = left.selectbox("Topic", topics)
+    n = right.slider("Messages to show", 5, 50, 15, step=5)
+    shown = [m for m in msgs if choice == "All" or m["topic"] == choice]
+    if not shown:
+        st.info("No messages yet for this topic. Are the publisher and listener running?")
+        return
+    st.caption("Newest first. Topics: data = raw reading, result = reading + AI status, "
+               "anomaly = only readings the AI flagged.")
+    lines = [f'[{m["time"]}] {m["topic"]}\n{m["payload"]}\n' for m in reversed(shown[-n:])]
+    st.code("\n".join(lines), language=None)
+
+
 def page_about():
     hero("ℹ️ About", "AI-Based Smart Meter Consumption Anomaly Detection Using IoT")
     st.markdown(
@@ -464,6 +495,8 @@ def page_about():
 # ---------------------------------------------------------------- router
 if page.endswith("About"):
     page_about()
+elif page.endswith("MQTT Feed"):
+    page_feed()
 elif df.empty:
     hero("⚡ Smart Meter Dashboard", "Waiting for the first reading")
     st.info("Waiting for live data from HiveMQ Cloud. Are kaggle_publisher.py and kaggle_live_anomaly.py running?")
