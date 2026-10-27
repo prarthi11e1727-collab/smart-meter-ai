@@ -1,7 +1,7 @@
+import collections
 import hmac
 import json
 import os
-import queue
 
 import altair as alt
 import pandas as pd
@@ -110,9 +110,29 @@ if not st.session_state.logged_in:
 
 
 # ---------------------------------------------------------------- MQTT
+def parse_row(r):
+    """Turn one MQTT message into a clean row, or None if it is not usable."""
+    try:
+        ai_status = r["ai_status"]
+        if ai_status not in ("Normal", "Anomaly"):
+            return None
+        return {
+            "timestamp": str(r["timestamp"]),
+            "building_id": int(r["building_id"]),
+            "meter_reading": float(r["meter_reading"]),
+            "ai_status": ai_status,
+            "anomaly_probability": float(r.get("anomaly_probability", float("nan"))),
+            "actual_anomaly": float(r["actual_anomaly"]) if "actual_anomaly" in r else float("nan"),
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 @st.cache_resource
 def start_mqtt():
-    q = queue.Queue()
+    """Runs once. The store is shared by every browser session."""
+    store = collections.deque(maxlen=MAX_ROWS)
+    seen = set()
     status = {"connected": False, "error": None}
     host = get_secret("HIVEMQ_HOST")
     user = get_secret("HIVEMQ_USER")
@@ -120,7 +140,7 @@ def start_mqtt():
 
     if not (host and user and password):
         status["error"] = "Missing HIVEMQ_HOST / HIVEMQ_USER / HIVEMQ_PASS in secrets."
-        return q, status, None
+        return store, seen, status, None
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     client.username_pw_set(user, password)
@@ -140,9 +160,16 @@ def start_mqtt():
 
     def on_message(client, userdata, msg):
         try:
-            q.put(json.loads(msg.payload.decode()))
+            row = parse_row(json.loads(msg.payload.decode()))
         except Exception:
-            pass
+            return
+        if row is None:
+            return
+        key = (row["timestamp"], row["building_id"])
+        if key in seen:   # skip repeated messages
+            return
+        seen.add(key)
+        store.append(row)
 
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
@@ -152,48 +179,11 @@ def start_mqtt():
         client.loop_start()
     except Exception as e:
         status["error"] = str(e)
-    return q, status, client
+    return store, seen, status, client
 
 
-q, mqtt_status, _client = start_mqtt()
+store, seen, mqtt_status, _client = start_mqtt()
 st_autorefresh(interval=REFRESH_MS, key="live_refresh")
-
-# ---------------------------------------------------------------- state
-if "readings" not in st.session_state:
-    st.session_state.readings = []
-if "anomaly_log" not in st.session_state:
-    st.session_state.anomaly_log = []
-if "seen" not in st.session_state:
-    st.session_state.seen = set()
-
-while not q.empty():
-    r = q.get()
-    try:
-        row = {
-            "timestamp": str(r["timestamp"]),
-            "building_id": int(r["building_id"]),
-            "meter_reading": float(r["meter_reading"]),
-        }
-        ai_status = r["ai_status"]
-        if ai_status not in ("Normal", "Anomaly"):
-            continue
-        row["ai_status"] = ai_status
-        row["anomaly_probability"] = float(r.get("anomaly_probability", float("nan")))
-        row["actual_anomaly"] = (
-            float(r["actual_anomaly"]) if "actual_anomaly" in r else float("nan")
-        )
-    except (KeyError, TypeError, ValueError):
-        continue
-    key = (row["timestamp"], row["building_id"])
-    if key in st.session_state.seen:   # skip repeated messages
-        continue
-    st.session_state.seen.add(key)
-    st.session_state.readings.append(row)
-    if ai_status == "Anomaly":
-        st.session_state.anomaly_log.append(row)
-
-st.session_state.readings = st.session_state.readings[-MAX_ROWS:]
-st.session_state.anomaly_log = st.session_state.anomaly_log[-100:]
 
 # ---------------------------------------------------------------- sidebar
 with st.sidebar:
@@ -203,15 +193,16 @@ with st.sidebar:
     st.divider()
     limit = st.number_input("🚨 High reading limit (kWh)", min_value=0.0, value=500.0, step=10.0)
     if st.button("🗑️ Clear data", use_container_width=True):
-        st.session_state.readings = []
-        st.session_state.anomaly_log = []
-        st.session_state.seen = set()
+        store.clear()
+        seen.clear()
         st.rerun()
     if st.button("🚪 Logout", use_container_width=True):
         st.session_state.logged_in = False
         st.rerun()
 
-df = pd.DataFrame(st.session_state.readings)
+rows = list(store)
+df = pd.DataFrame(rows)
+anomaly_log = [r for r in rows if r["ai_status"] == "Anomaly"][-100:]
 if not df.empty:
     df["high_reading"] = df["meter_reading"] > limit
 
@@ -409,8 +400,8 @@ def page_anomalies():
         st.altair_chart(scatter, use_container_width=True)
     with right:
         st.subheader("Anomaly log")
-        if st.session_state.anomaly_log:
-            log_df = pd.DataFrame(st.session_state.anomaly_log).iloc[::-1]
+        if anomaly_log:
+            log_df = pd.DataFrame(anomaly_log).iloc[::-1]
             st.dataframe(
                 log_df[["timestamp", "building_id", "meter_reading", "anomaly_probability"]],
                 use_container_width=True, hide_index=True,
@@ -445,7 +436,7 @@ def page_about():
 - 🎯 **Real labels** from the Kaggle data are shown next to the AI answer, so you can see what it caught and missed.
 - 🚨 **High reading alert** fires when a reading goes above the limit you set in the sidebar.
 
-**Tech stack:** Python · Streamlit · paho-mqtt · scikit-learn · SQLite
+**Tech stack:** Python · Streamlit · paho-mqtt · scikit-learn · Altair · pandas
         """
     )
 
