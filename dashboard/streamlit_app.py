@@ -25,9 +25,9 @@ TOPIC = "smartmeter/kaggle/result"           # reading + AI status
 ANOMALY_TOPIC = "smartmeter/kaggle/anomaly"  # only readings the AI flagged
 FEED_TOPIC = "smartmeter/kaggle/#"           # every Kaggle topic, for the MQTT Feed page
 PORT = 8883
-MAX_ROWS = 500
+MAX_ROWS = 5000        # keeps the whole replay (4,976 readings) on the page
 REFRESH_MS = 2000
-REPLAY_SECONDS = 2.0   # pause between replayed readings
+REPLAY_SECONDS = 1.0   # pause between replayed readings
 AI_THRESHOLD = 0.5     # same value as THRESHOLD in kaggle_live_anomaly.py
 DEFAULT_FEATURES = ["building_id", "meter_reading", "hour", "day_of_week", "month"]
 PAGES = [
@@ -91,8 +91,10 @@ def check_login(username, password):
     valid_pass = get_secret("APP_PASSWORD")
     if not valid_user or not valid_pass:
         return None
-    ok_user = hmac.compare_digest(username.encode(), str(valid_user).encode())
-    ok_pass = hmac.compare_digest(password.encode(), str(valid_pass).encode())
+    u = username.strip().lower().encode()
+    p = password.strip().encode()
+    ok_user = hmac.compare_digest(u, str(valid_user).strip().lower().encode())
+    ok_pass = hmac.compare_digest(p, str(valid_pass).strip().encode())
     return ok_user and ok_pass
 
 
