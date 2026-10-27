@@ -2,9 +2,12 @@ import collections
 import hmac
 import json
 import os
+import threading
 import time
+from pathlib import Path
 
 import altair as alt
+import joblib
 import pandas as pd
 import paho.mqtt.client as mqtt
 import streamlit as st
@@ -17,12 +20,16 @@ except ImportError:
     pass
 
 # ---------------------------------------------------------------- settings
-TOPIC = "smartmeter/kaggle/result"   # AI-labelled readings from kaggle_live_anomaly.py
-FEED_TOPIC = "smartmeter/kaggle/#"   # every Kaggle topic, for the MQTT Feed page
+DATA_TOPIC = "smartmeter/kaggle/data"        # raw reading
+TOPIC = "smartmeter/kaggle/result"           # reading + AI status
+ANOMALY_TOPIC = "smartmeter/kaggle/anomaly"  # only readings the AI flagged
+FEED_TOPIC = "smartmeter/kaggle/#"           # every Kaggle topic, for the MQTT Feed page
 PORT = 8883
 MAX_ROWS = 500
 REFRESH_MS = 2000
-AI_THRESHOLD = 0.5   # same value as THRESHOLD in kaggle_live_anomaly.py
+REPLAY_SECONDS = 2.0   # pause between replayed readings
+AI_THRESHOLD = 0.5     # same value as THRESHOLD in kaggle_live_anomaly.py
+DEFAULT_FEATURES = ["building_id", "meter_reading", "hour", "day_of_week", "month"]
 PAGES = [
     "🏠  Overview",
     "📈  Live Charts",
@@ -112,6 +119,103 @@ if not st.session_state.logged_in:
     st.stop()
 
 
+# ---------------------------------------------------------------- built-in replay
+def load_replay_assets():
+    """Load the demo CSV and the trained model that sit in the GitHub repo."""
+    here = Path(__file__).resolve().parent
+
+    csv_path = here / "demo_building_107.csv"
+    if not csv_path.exists():
+        raise FileNotFoundError(f"demo CSV not found: {csv_path}")
+    data = pd.read_csv(csv_path).dropna().sort_values("timestamp")
+
+    model_path = None
+    for p in (
+        here / "kaggle_anomaly_model.joblib",
+        here.parent / "ai" / "kaggle_anomaly_model.joblib",
+    ):
+        if p.exists():
+            model_path = p
+            break
+    if model_path is None:
+        raise FileNotFoundError("kaggle_anomaly_model.joblib not found in dashboard/ or ai/")
+
+    obj = joblib.load(model_path)
+    model, features, threshold = obj, None, AI_THRESHOLD
+    if isinstance(obj, dict):   # in case the model was saved together with extra info
+        model = None
+        for key in ("model", "clf", "classifier", "pipeline"):
+            if obj.get(key) is not None:
+                model = obj[key]
+                break
+        if model is None:
+            raise ValueError("Could not find the model inside the joblib file.")
+        features = obj.get("features") or obj.get("feature_columns")
+        if obj.get("threshold") is not None:
+            threshold = float(obj["threshold"])
+    if features is None:
+        features = list(getattr(model, "feature_names_in_", DEFAULT_FEATURES))
+    return data, model, list(features), threshold
+
+
+def predict_probability(model, features, row):
+    ts = pd.Timestamp(row["timestamp"])
+    values = {
+        "building_id": int(row["building_id"]),
+        "meter_reading": float(row["meter_reading"]),
+        "hour": ts.hour,
+        "day_of_week": ts.dayofweek,
+        "month": ts.month,
+    }
+    X = pd.DataFrame([values])[features]
+    proba = model.predict_proba(X)[0]
+    classes = list(model.classes_)
+    return float(proba[classes.index(1)]) if 1 in classes else float(proba[-1])
+
+
+def replay_loop(client, status, store, seen):
+    """Background thread: publish readings to HiveMQ, then the AI result."""
+    try:
+        data, model, features, threshold = load_replay_assets()
+    except Exception as e:
+        status["replay_error"] = f"Replay could not start: {e}"
+        return
+
+    records = data.to_dict("records")
+    while True:
+        for rec in records:
+            while not status["connected"]:
+                time.sleep(1)
+            try:
+                prob = predict_probability(model, features, rec)
+                is_anomaly = prob >= threshold
+                base = {
+                    "timestamp": str(rec["timestamp"]),
+                    "building_id": int(rec["building_id"]),
+                    "meter_reading": float(rec["meter_reading"]),
+                }
+                actual = int(rec["anomaly"])
+                client.publish(DATA_TOPIC, json.dumps({**base, "actual_anomaly": actual}))
+                result = {
+                    **base,
+                    "ai_status": "Anomaly" if is_anomaly else "Normal",
+                    "anomaly_probability": round(prob, 4),
+                    "actual_anomaly": actual,
+                }
+                client.publish(TOPIC, json.dumps(result))
+                if is_anomaly:
+                    client.publish(ANOMALY_TOPIC, json.dumps(result))
+                status["replay_error"] = None
+            except Exception as e:
+                status["replay_error"] = f"Replay error: {e}"
+                time.sleep(5)
+                continue
+            time.sleep(REPLAY_SECONDS)
+        # reached the end of the file: start again from 1 Jan with a clean page
+        store.clear()
+        seen.clear()
+
+
 # ---------------------------------------------------------------- MQTT
 def parse_row(r):
     """Turn one MQTT message into a clean row, or None if it is not usable."""
@@ -137,7 +241,7 @@ def start_mqtt():
     store = collections.deque(maxlen=MAX_ROWS)
     feed = collections.deque(maxlen=200)   # raw messages from all topics
     seen = set()
-    status = {"connected": False, "error": None}
+    status = {"connected": False, "error": None, "replay_error": None}
     host = get_secret("HIVEMQ_HOST")
     user = get_secret("HIVEMQ_USER")
     password = get_secret("HIVEMQ_PASS")
@@ -185,6 +289,9 @@ def start_mqtt():
     try:
         client.connect(host, PORT, 60)
         client.loop_start()
+        threading.Thread(
+            target=replay_loop, args=(client, status, store, seen), daemon=True
+        ).start()
     except Exception as e:
         status["error"] = str(e)
     return store, seen, feed, status, client
@@ -200,11 +307,7 @@ with st.sidebar:
     page = st.radio("Navigation", PAGES, label_visibility="collapsed")
     st.divider()
     limit = st.number_input("🚨 High reading limit (kWh)", min_value=0.0, value=500.0, step=10.0)
-    if st.button("🗑️ Clear data", use_container_width=True):
-        store.clear()
-        seen.clear()
-        feed.clear()
-        st.rerun()
+    # The Clear data button is removed: the data is shared by every visitor.
     if st.button("🚪 Logout", use_container_width=True):
         st.session_state.logged_in = False
         st.rerun()
@@ -242,6 +345,8 @@ elif mqtt_status["connected"]:
     st.markdown(f'<span class="pill pill-ok">🟢 Connected · {TOPIC}</span>', unsafe_allow_html=True)
 else:
     st.markdown('<span class="pill pill-warn">🟡 Connecting to HiveMQ Cloud...</span>', unsafe_allow_html=True)
+if mqtt_status.get("replay_error"):
+    st.markdown(f'<span class="pill pill-bad">❌ {mqtt_status["replay_error"]}</span>', unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------- charts
@@ -460,13 +565,13 @@ def page_feed():
     c2.metric("🤖 Result messages", sum(m["topic"].endswith("/result") for m in msgs))
     c3.metric("🚨 Anomaly messages", sum(m["topic"].endswith("/anomaly") for m in msgs))
     st.write("")
-    topics = ["All", "smartmeter/kaggle/data", "smartmeter/kaggle/result", "smartmeter/kaggle/anomaly"]
+    topics = ["All", DATA_TOPIC, TOPIC, ANOMALY_TOPIC]
     left, right = st.columns([2, 1], gap="medium")
     choice = left.selectbox("Topic", topics)
     n = right.slider("Messages to show", 5, 50, 15, step=5)
     shown = [m for m in msgs if choice == "All" or m["topic"] == choice]
     if not shown:
-        st.info("No messages yet for this topic. Are the publisher and listener running?")
+        st.info("No messages yet for this topic. The replay sends a new reading every couple of seconds.")
         return
     st.caption("Newest first. Topics: data = raw reading, result = reading + AI status, "
                "anomaly = only readings the AI flagged.")
@@ -499,7 +604,7 @@ elif page.endswith("MQTT Feed"):
     page_feed()
 elif df.empty:
     hero("⚡ Smart Meter Dashboard", "Waiting for the first reading")
-    st.info("Waiting for live data from HiveMQ Cloud. Are kaggle_publisher.py and kaggle_live_anomaly.py running?")
+    st.info("Waiting for the first reading from HiveMQ Cloud. The built-in replay sends one every couple of seconds.")
 elif page.endswith("Overview"):
     page_overview()
 elif page.endswith("Live Charts"):

@@ -1,103 +1,89 @@
-
-import pandas as pd
+import json
+import os
 from pathlib import Path
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import (
-    classification_report,
-    confusion_matrix,
-    roc_auc_score
-)
 
-# Kaggle dataset path
-DATA_FILE = Path("data/train.csv")
-
-print("Loading Kaggle smart-meter dataset...")
-
-# Load only the required columns
-data = pd.read_csv(
-    DATA_FILE,
-    usecols=["building_id", "timestamp", "meter_reading", "anomaly"]
-)
-
-print("Total records loaded:", len(data))
-
-# Remove records without a usable consumption reading or label
-data = data.dropna(
-    subset=["building_id", "timestamp", "meter_reading", "anomaly"]
-).copy()
-
-# Convert timestamp into useful numerical features
-data["timestamp"] = pd.to_datetime(data["timestamp"], errors="coerce")
-data = data.dropna(subset=["timestamp", "meter_reading", "anomaly"])
-
-data["hour"] = data["timestamp"].dt.hour
-data["day_of_week"] = data["timestamp"].dt.dayofweek
-data["month"] = data["timestamp"].dt.month
-
-# Input features: do NOT include the anomaly label
-feature_columns = [
-    "building_id",
-    "meter_reading",
-    "hour",
-    "day_of_week",
-    "month"
-]
-
-X = data[feature_columns]
-y = data["anomaly"].astype(int)
-
-print("\nUsable records:", len(data))
-print("Class distribution:")
-print(y.value_counts())
-
-# Use a manageable, reproducible sample for the first experiment
-if len(data) > 100_000:
-    sample = data.sample(n=100_000, random_state=42)
-    X = sample[feature_columns]
-    y = sample["anomaly"].astype(int)
-
-# Keep anomaly proportions similar in training and testing
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y,
-    test_size=0.2,
-    random_state=42,
-    stratify=y
-)
-
-print("\nTraining Random Forest model...")
-
-model = RandomForestClassifier(
-    n_estimators=100,
-    class_weight="balanced",
-    random_state=42,
-    n_jobs=-1
-)
-
-model.fit(X_train, y_train)
-
-# Evaluate on records not used for training
-predictions = model.predict(X_test)
-probabilities = model.predict_proba(X_test)[:, 1]
-
-print("\nKaggle Smart-Meter Anomaly Detection Results")
-print("--------------------------------------------")
-print(classification_report(
-    y_test,
-    predictions,
-    target_names=["Normal", "Anomaly"],
-    zero_division=0
-))
-
-print("Confusion matrix:")
-print(confusion_matrix(y_test, predictions))
-
-print("ROC-AUC:", round(roc_auc_score(y_test, probabilities), 4))
-
-# Save the trained model
 import joblib
+import pandas as pd
+import paho.mqtt.client as mqtt
+from dotenv import load_dotenv
 
-output_file = Path("ai/kaggle_anomaly_model.joblib")
-joblib.dump(model, output_file)
+ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(ROOT / ".env")
 
-print("\nModel saved to:", output_file)
+BROKER = os.getenv("HIVEMQ_HOST")
+USERNAME = os.getenv("HIVEMQ_USER")
+PASSWORD = os.getenv("HIVEMQ_PASS")
+PORT = 8883
+
+IN_TOPIC = "smartmeter/kaggle/data"
+RESULT_TOPIC = "smartmeter/kaggle/result"
+ANOMALY_TOPIC = "smartmeter/kaggle/anomaly"
+
+MODEL_FILE = ROOT / "ai" / "kaggle_anomaly_model.joblib"
+FEATURES = ["building_id", "meter_reading", "hour", "day_of_week", "month"]
+THRESHOLD = 0.5   # lower it (for example 0.3) to catch more anomalies
+
+if not (BROKER and USERNAME and PASSWORD):
+    raise SystemExit("Missing HIVEMQ_HOST / HIVEMQ_USER / HIVEMQ_PASS in .env")
+if not MODEL_FILE.exists():
+    raise SystemExit("Model file not found. Run ai/kaggle_anomaly_detection.py first.")
+
+model = joblib.load(MODEL_FILE)
+ANOMALY_COL = list(model.classes_).index(1)
+print("Kaggle AI model loaded.")
+
+
+def on_connect(client, userdata, flags, reason_code, properties):
+    if reason_code == 0:
+        print("Connected to HiveMQ Cloud! Listening on", IN_TOPIC)
+        client.subscribe(IN_TOPIC)
+    else:
+        print("Connection failed:", reason_code)
+
+
+def on_message(client, userdata, msg):
+    try:
+        data = json.loads(msg.payload.decode())
+        ts = pd.to_datetime(data["timestamp"])
+        row = pd.DataFrame(
+            [[
+                int(data["building_id"]),
+                float(data["meter_reading"]),
+                ts.hour,
+                ts.dayofweek,
+                ts.month,
+            ]],
+            columns=FEATURES,
+        )
+    except Exception as e:
+        print("Skipped bad message:", e)
+        return
+
+    probability = float(model.predict_proba(row)[0][ANOMALY_COL])
+    status = "Anomaly" if probability >= THRESHOLD else "Normal"
+
+    result = dict(data)
+    result["ai_status"] = status
+    result["anomaly_probability"] = round(probability, 4)
+    payload = json.dumps(result)
+
+    client.publish(RESULT_TOPIC, payload)
+    if status == "Anomaly":
+        client.publish(ANOMALY_TOPIC, payload)
+        print("ANOMALY :", data["timestamp"], data["meter_reading"], "| chance", round(probability, 2))
+    else:
+        print("Normal  :", data["timestamp"], data["meter_reading"])
+
+
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+client.username_pw_set(USERNAME, PASSWORD)
+client.tls_set()
+client.on_connect = on_connect
+client.on_message = on_message
+
+client.connect(BROKER, PORT, 60)
+try:
+    client.loop_forever()
+except KeyboardInterrupt:
+    print("\nDetector stopped.")
+    client.disconnect()

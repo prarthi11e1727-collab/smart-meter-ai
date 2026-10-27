@@ -16,4 +16,5 @@ venv/
 
 # OS files
 .DS_Store
-Thumbs.db
+Thumbs.dbdata/train.csv
+data/train_features.csv

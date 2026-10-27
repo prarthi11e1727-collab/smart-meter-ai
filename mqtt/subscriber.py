@@ -4,13 +4,18 @@ import json
 import csv
 import os
 import sqlite3
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # HiveMQ Cloud
 BROKER = "50b0ba49257044d3b4b3faf5c7c09cd3.s1.eu.hivemq.cloud"
 PORT = 8883
 
-USERNAME = "smartmeter"
-PASSWORD = "12345678"
+BROKER = os.getenv("HIVEMQ_HOST")
+USERNAME = os.getenv("HIVEMQ_USER")
+PASSWORD = os.getenv("HIVEMQ_PASS")
+PORT = 8883
 
 TOPIC = "smartmeter/data"
 
